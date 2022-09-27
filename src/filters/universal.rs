@@ -1,5 +1,5 @@
 use super::cascaded::Cascaded;
-use super::bw::{Butterworth, ButterworthParameters, BiquadTransformation};
+use super::bw::{Butterworth, ButterworthParameters, BiquadTransformation, ButterworthFilterOrder};
 use super::gain::GainFilter;
 
 #[derive(Debug, Clone)]
@@ -26,6 +26,9 @@ impl Slope {
     pub fn order(&self) -> f64 {
         // order * 6 = db_slope
         self.0 / 6.0
+    }
+    pub fn bw_order(&self) -> Result<ButterworthFilterOrder, super::bw::FilterOrderUnsupportedError> {
+        ButterworthFilterOrder::from_f64(self.order())
     }
 }
 #[derive(Debug, Clone)]

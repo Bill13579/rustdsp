@@ -294,7 +294,9 @@ impl Butterworth {
         let mut last_i = 0;
         for (i, (n, d)) in factors.iter().enumerate() {
             if i < filters.len() {
+                filters[i].set_sampling_period(self.T);
                 filters[i].set_s_transfer(n.get(), d.get())?;
+                filters[i].set_frequency(self.freq);
             } else {
                 filters.push(NormalizedBilinLaplace::new(self.T, n.get(), d.get(), self.freq)?);
             }

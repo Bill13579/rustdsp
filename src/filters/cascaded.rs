@@ -42,6 +42,7 @@ impl<T> FR for Cascaded<T> where T: Filter + FR {
 }
 
 pub trait ZTransformFilter: Filter + FR {  }
+impl<T> ZTransformFilter for T where T: Filter + FR {}
 pub struct CascadedDyn<'a> {
     filters: &'a mut Vec<Box<dyn ZTransformFilter>>
 }
