@@ -331,149 +331,51 @@ pub struct FFTConvolution<T> where T: FR + Clone {
     fft_planner: Arc<Mutex<FftPlanner<f64>>>,
 }
 
-pub struct FFTQuickDoubleConvolution<T> where T: FR + Clone {
-    conv: FFTConvolution<T>,
-    buffer: RingBuffer<f64>,
-    out: RingBuffer<f64>,
-    last: VecDeque<f64>
-}
-impl<T> FFTQuickDoubleConvolution<T> where T: FR + Clone {
-    pub fn new(window_size: usize, T: f64, fr: T) -> FFTQuickDoubleConvolution<T> {
-        FFTQuickDoubleConvolution {
-            conv: FFTConvolution::new(window_size, T, fr),
-            buffer: RingBuffer::new(window_size),
-            out: RingBuffer::new(window_size - Self::good_margin(window_size)),
-            last: VecDeque::from_iter(iter::repeat(0.0).take(Self::good_margin(window_size)))
-        }
-    }
-    fn good_margin(window_size: usize) -> usize {
-        (window_size / 3).min(128)
-    }
-}
-impl<T> Filter for FFTQuickDoubleConvolution<T> where T: FR + Clone {
-    fn clear(&mut self) {
-        self.conv.clear();
-        self.buffer.clear();
-        self.out.clear();
-        self.last = VecDeque::from_iter(iter::repeat(0.0).take(Self::good_margin(self.buffer.capacity())));
-    }
-    fn compute(&mut self, signal: f64) -> f64 {
-        let mut buffered_signal = 0.0;
-        if let Some(signal) = self.out.pop_front() {
-            buffered_signal = signal;
-        }
-
-        if let Some(mut chunk) = self.buffer.buffer_back(signal) {
-            let good = chunk.len() - Self::good_margin(chunk.len());
-            for s in chunk.iter() {
-                self.conv.compute(*s);
-            }
-            for (i, s) in self.conv.output_buffer().inner().iter().enumerate() {
-                if i < good {
-                    self.out.push_back(*s);
-                } else {
-                    self.buffer.buffer_back(chunk[i]);
-                }
-            }
-            self.conv.last_mut().truncate(good);
-            for i in (0..self.last.len()).rev() {
-                if let Some(last_tail) = self.last.get(i) {
-                    self.conv.last_mut().push_front(Complex::new(*last_tail, 0.0));
-                }
-            }
-            {
-                chunk.drain(..chunk.len()-Self::good_margin(chunk.len()));
-            }
-            self.last = chunk;
-        }
-        
-        buffered_signal
-    }
-}
-
-pub struct FFTDoubleConvolution<T> where T: FR + Clone {
-    a: FFTConvolution<T>,
-    b: FFTConvolution<T>,
-    c: usize,
-    send_to_b: bool,
-    which: bool
-}
-impl<T> FFTDoubleConvolution<T> where T: FR + Clone {
-    pub fn new(window_size: usize, T: f64, fr: T) -> FFTDoubleConvolution<T> {
-        FFTDoubleConvolution {
-            a: FFTConvolution::new(window_size, T, fr.clone()),
-            b: FFTConvolution::new(window_size, T, fr),
-            c: 0,
-            send_to_b: false,
-            which: true
-        }
-    }
-    pub fn set_window_size(&mut self, window_size: usize) {
-        self.a.set_window_size(window_size);
-        self.b.set_window_size(window_size);
-    }
-    pub fn set_sampling_period(&mut self, T: f64) {
-        self.a.set_sampling_period(T);
-        self.b.set_sampling_period(T);
-    }
-    pub fn set_frequency_response(&mut self, fr: T) {
-        self.a.set_frequency_response(fr.clone());
-        self.b.set_frequency_response(fr);
-    }
-}
-impl<T> Filter for FFTDoubleConvolution<T> where T: FR + Clone {
-    fn clear(&mut self) {
-        self.a.clear();
-        self.b.clear();
-        self.c = 0;
-        self.send_to_b = false;
-        self.which = true;
-    }
-    fn compute(&mut self, signal: f64) -> f64 {
-        let a = self.a.compute(signal);
-        let mut b = 0.0;
-        if self.c >= self.a.x.capacity() / 2 {
-            self.c = 0;
-            self.send_to_b = true;
-            self.which = !self.which;
-        }
-        if self.send_to_b {
-            b = self.b.compute(signal);
-        }
-        self.c += 1;
-        if self.which {
-            a
-        } else {
-            b
-        }
-    }
-}
-
 impl<T> FFTConvolution<T> where T: FR + Clone {
     pub fn new(window_size: usize, T: f64, fr: T) -> FFTConvolution<T> {
         let mut conv = FFTConvolution {
             x: RingBuffer::new(window_size),
-            out: RingBuffer::new(window_size).initialize(0.0),
+            out: RingBuffer::new(Self::padded_window_size(window_size)).initialize(0.0),
             last: VecDeque::from_iter(iter::repeat(Complex::zero()).take(window_size)),
             window_size,
             T,
             fr,
-            fr_cache: Vec::with_capacity(window_size),
+            fr_cache: Vec::new(),
             fft_planner: Arc::new(Mutex::new(FftPlanner::new())),
         };
         conv.refill_cache();
         conv
     }
     fn refill_cache(&mut self) {
-        let overlap_save_window_size = self.window_size * 2;
-        self.fr_cache = Vec::with_capacity(overlap_save_window_size);
+        let window_size = self.window_size;
+        self.fr_cache = Vec::with_capacity(window_size * 2);
         let sample_rate = 1.0 / self.T;
-        for i in 0..overlap_save_window_size {
-            let mut freq = fftfreq(i, overlap_save_window_size, Some(self.T));
+        for i in 0..window_size {
+            let mut freq = fftfreq(i, window_size, Some(self.T));
             if freq >= sample_rate / 2.0 {
                 freq = sample_rate - freq;
             }
-            self.fr_cache.push(self.fr.frequency_response(z(1.0, omega(freq, Some(self.T)))));
+            let sample = self.fr.frequency_response(z(1.0, omega(freq, Some(self.T))));
+            self.fr_cache.push(Complex::new(sample.norm(), 0.0));
+        }
+        {
+            let ifft = self.fft_planner.lock().unwrap().plan_fft_inverse(window_size);
+            ifft.process(&mut self.fr_cache);
+        }
+        let norm_factor = self.fr_cache.len() as f64;
+        for val in &mut self.fr_cache {
+            *val /= norm_factor;
+        }
+        let swap_dist = window_size / 2;
+        for i in 0..swap_dist {
+            self.fr_cache.swap(i, i + swap_dist);
+        }
+        for _ in 0..window_size {
+            self.fr_cache.push(Complex::zero());
+        }
+        {
+            let fft = self.fft_planner.lock().unwrap().plan_fft_forward(window_size * 2);
+            fft.process(&mut self.fr_cache);
         }
     }
     pub fn set_window_size(&mut self, window_size: usize) {
@@ -498,6 +400,9 @@ impl<T> FFTConvolution<T> where T: FR + Clone {
     pub fn last_mut(&mut self) -> &mut VecDeque<Complex<f64>> {
         &mut self.last
     }
+    fn padded_window_size(window_size: usize) -> usize {
+        (window_size.next_power_of_two() + 1).next_power_of_two()
+    }
 }
 impl<T> Filter for FFTConvolution<T> where T: FR + Clone {
     fn clear(&mut self) {
@@ -511,44 +416,42 @@ impl<T> Filter for FFTConvolution<T> where T: FR + Clone {
         self.out.push_back(0.0);
 
         if let Some(chunk) = self.x.buffer_back(Complex::new(signal, 0.0)) {
-            let window_size = self.last.len() + chunk.len();
-            let mut buffer: Vec<Complex<f64>> = self.last.iter().copied().chain(chunk.iter().copied()).collect();
-            {
-                let fft = self.fft_planner.lock().unwrap().plan_fft_forward(window_size);
-                fft.process(&mut buffer);
-            }
-            // let fr = self.fr.frequency_responses(chunk.len(), window_size - chunk.len(), &mut self.fft_planner.lock().unwrap());
-            for (i, val) in buffer.iter_mut().enumerate() {
-                // *val *= fr[i].norm(); //TODO: Strip phase?
-                *val *= self.fr_cache[i].norm(); //TODO: Strip phase?
-            }
-            {
-                let ifft = self.fft_planner.lock().unwrap().plan_fft_inverse(window_size);
-                ifft.process(&mut buffer);
-            }
-            for (out_ref, buf_val) in self.out.inner_mut().iter_mut().zip(buffer.iter().skip(self.last.len())) {
-                *out_ref += buf_val.re / window_size as f64; //TODO: Magnitude or Real part?
-            }
-            self.last = chunk;
-            // let window_size = chunk.len();
-            // let padded_window_size = Self::padded_window_size(window_size);
-            // let mut buffer: Vec<Complex<f64>> = chunk.into_iter().chain(iter::repeat(Complex::zero()).take(padded_window_size - window_size)).collect();
+            let window_size = chunk.len();
+            // let window_size = self.last.len() + chunk.len();
+            // let mut buffer: Vec<Complex<f64>> = self.last.iter().copied().chain(chunk.iter().copied()).collect();
             // {
-            //     let fft = self.fft_planner.lock().unwrap().plan_fft_forward(padded_window_size);
+            //     let fft = self.fft_planner.lock().unwrap().plan_fft_forward(window_size);
             //     fft.process(&mut buffer);
             // }
+            // // let fr = self.fr.frequency_responses(chunk.len(), window_size - chunk.len(), &mut self.fft_planner.lock().unwrap());
             // for (i, val) in buffer.iter_mut().enumerate() {
-            //     let freq = fftfreq(i, padded_window_size, Some(self.T));
-            //     let fr = self.fr.frequency_response(z(1.0, omega(freq, Some(self.T))));
-            //     *val *= fr.norm(); //TODO: Strip phase?
+            //     // *val *= fr[i].norm(); //TODO: Strip phase?
+            //     *val *= self.fr_cache[i].norm(); //TODO: Strip phase?
             // }
             // {
-            //     let ifft = self.fft_planner.lock().unwrap().plan_fft_inverse(padded_window_size);
+            //     let ifft = self.fft_planner.lock().unwrap().plan_fft_inverse(window_size);
             //     ifft.process(&mut buffer);
             // }
-            // for (out_ref, buf_val) in self.out.inner().iter_mut().zip(buffer.into_iter()).take(window_size) {
-            //     *out_ref += buf_val.re / padded_window_size as f64; //TODO: Magnitude or Real part?
+            // for (out_ref, buf_val) in self.out.inner_mut().iter_mut().zip(buffer.iter().skip(self.last.len())) {
+            //     *out_ref += buf_val.re / window_size as f64; //TODO: Magnitude or Real part?
             // }
+            // self.last = chunk;
+            let padded_window_size = Self::padded_window_size(window_size);
+            let mut buffer: Vec<Complex<f64>> = chunk.into_iter().chain(iter::repeat(Complex::zero()).take(padded_window_size - window_size)).collect();
+            {
+                let fft = self.fft_planner.lock().unwrap().plan_fft_forward(padded_window_size);
+                fft.process(&mut buffer);
+            }
+            for (i, val) in buffer.iter_mut().enumerate() {
+                *val *= self.fr_cache[i]; //TODO: Strip phase?
+            }
+            {
+                let ifft = self.fft_planner.lock().unwrap().plan_fft_inverse(padded_window_size);
+                ifft.process(&mut buffer);
+            }
+            for (out_ref, buf_val) in self.out.inner_mut().iter_mut().zip(buffer.into_iter()).take(padded_window_size) {
+                *out_ref += buf_val.re / padded_window_size as f64; //TODO: Magnitude or Real part?
+            }
         }
         
         buffered_signal
